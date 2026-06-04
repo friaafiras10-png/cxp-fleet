@@ -49,6 +49,14 @@ interface VacationRequest {
   createdAt: string;
 }
 
+interface Vehicle {
+  id: string;
+  immatriculation: string;
+  marque: string;
+  modele: string;
+  chauffeurAssigne: string;
+}
+
 export default function EmployeeDashboard() {
   const router = useRouter();
   const [user, setUser] = useState<UserData | null>(null);
@@ -75,6 +83,13 @@ export default function EmployeeDashboard() {
   // Work tracking state
   const [startKm, setStartKm] = useState("");
   const [endKm, setEndKm] = useState("");
+
+  // GPS tracking state
+  const [assignedVehicle, setAssignedVehicle] = useState<Vehicle | null>(null);
+  const [allVehicles, setAllVehicles] = useState<Vehicle[]>([]);
+  const [gpsTracking, setGpsTracking] = useState(false);
+  const [showGpsModal, setShowGpsModal] = useState(false);
+  const watchIdRef = useState<number | null>(null)[1];
 
   // Check auth
   useEffect(() => {
@@ -106,6 +121,17 @@ export default function EmployeeDashboard() {
           setWorkSession({ id: sessionsSnap.docs[0].id, ...sessionsSnap.docs[0].data() } as WorkSession);
         }
 
+        // Load all vehicles
+        const vehiclesSnap = await getDocs(collection(db, "vehicles"));
+        const vehiclesData = vehiclesSnap.docs.map((doc) => ({
+          id: doc.id,
+          ...doc.data(),
+        })) as Vehicle[];
+        setAllVehicles(vehiclesData);
+
+        // Show vehicle selection modal
+        setShowGpsModal(true);
+
         setAuthChecking(false);
         setLoading(false);
       } catch (error) {
@@ -117,6 +143,59 @@ export default function EmployeeDashboard() {
 
     return () => unsubscribe();
   }, [router]);
+
+  // GPS Tracking function
+  const startGPSTracking = async (vehicleId: string, vehicleData: any) => {
+    if (!navigator.geolocation) {
+      console.log("Geolocation not supported");
+      return;
+    }
+
+    const watchId = navigator.geolocation.watchPosition(
+      async (position) => {
+        try {
+          const { latitude, longitude, accuracy } = position.coords;
+          const speed = position.coords.speed || 0;
+
+          // Save to Firebase
+          await updateDoc(doc(db, "vehicleLocations", vehicleId), {
+            vehicleId,
+            immatriculation: vehicleData.immatriculation,
+            marque: vehicleData.marque,
+            modele: vehicleData.modele,
+            latitude,
+            longitude,
+            accuracy,
+            speed,
+            timestamp: new Date().toISOString(),
+            isTracking: true,
+          }).catch(async () => {
+            // Create if doesn't exist
+            await addDoc(collection(db, "vehicleLocations"), {
+              vehicleId,
+              immatriculation: vehicleData.immatriculation,
+              marque: vehicleData.marque,
+              modele: vehicleData.modele,
+              latitude,
+              longitude,
+              accuracy,
+              speed,
+              timestamp: new Date().toISOString(),
+              isTracking: true,
+            });
+          });
+
+          setGpsTracking(true);
+        } catch (error) {
+          console.error("Error sending GPS:", error);
+        }
+      },
+      (error) => {
+        console.log("GPS error:", error);
+      },
+      { enableHighAccuracy: true, maximumAge: 0, timeout: 5000 }
+    );
+  };
 
   // Request fuel
   const requestFuel = async () => {
@@ -866,6 +945,100 @@ export default function EmployeeDashboard() {
                 </button>
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Vehicle Selection Modal */}
+      {showGpsModal && (
+        <div style={{
+          position: "fixed",
+          inset: 0,
+          background: "rgba(0,0,0,0.5)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          zIndex: 100,
+          backdropFilter: "blur(4px)",
+        }}>
+          <div style={{
+            background: "white",
+            borderRadius: "20px",
+            padding: "32px",
+            maxWidth: "600px",
+            width: "90%",
+            maxHeight: "80vh",
+            overflowY: "auto",
+            boxShadow: "0 30px 60px rgba(0,0,0,0.3)",
+          }}>
+            <h2 style={{ fontSize: "22px", fontWeight: 700, color: "#1f0a2a", marginBottom: "12px", textAlign: "center" }}>
+              🚗 Sélectionnez votre véhicule
+            </h2>
+            
+            <p style={{ fontSize: "14px", color: "#6a3a78", marginBottom: "24px", textAlign: "center" }}>
+              Choisissez le véhicule que vous allez conduire aujourd'hui
+            </p>
+
+            {allVehicles.length === 0 ? (
+              <p style={{ textAlign: "center", color: "#6a3a78", fontSize: "14px" }}>
+                Aucun véhicule disponible
+              </p>
+            ) : (
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px", marginBottom: "20px" }}>
+                {allVehicles.map((vehicle) => (
+                  <div
+                    key={vehicle.id}
+                    onClick={() => {
+                      setAssignedVehicle(vehicle);
+                      setShowGpsModal(false);
+                      startGPSTracking(vehicle.id, vehicle);
+                    }}
+                    style={{
+                      background: "rgba(155,62,213,0.05)",
+                      border: "2px solid rgba(155,62,213,0.2)",
+                      borderRadius: "12px",
+                      padding: "16px",
+                      cursor: "pointer",
+                      transition: "all 0.25s",
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.background = "rgba(155,62,213,0.15)";
+                      e.currentTarget.style.borderColor = "rgba(155,62,213,0.5)";
+                      e.currentTarget.style.transform = "translateY(-4px)";
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.background = "rgba(155,62,213,0.05)";
+                      e.currentTarget.style.borderColor = "rgba(155,62,213,0.2)";
+                      e.currentTarget.style.transform = "translateY(0)";
+                    }}
+                  >
+                    <p style={{ fontSize: "16px", fontWeight: 700, color: "#9b3ed5", marginBottom: "6px" }}>
+                      {vehicle.immatriculation}
+                    </p>
+                    <p style={{ fontSize: "13px", color: "#1f0a2a" }}>
+                      {vehicle.marque} {vehicle.modele}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <button
+              onClick={() => setShowGpsModal(false)}
+              style={{
+                width: "100%",
+                padding: "12px",
+                background: "rgba(200,140,240,0.15)",
+                border: "1px solid rgba(200,140,240,0.3)",
+                color: "#9b3ed5",
+                borderRadius: "10px",
+                fontWeight: 600,
+                cursor: "pointer",
+                transition: "all 0.25s",
+              }}
+            >
+              Plus tard
+            </button>
           </div>
         </div>
       )}

@@ -2,9 +2,16 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { onAuthStateChanged } from "firebase/auth";
-import { doc, getDoc, collection, getDocs, query, where, updateDoc } from "firebase/firestore";
+import { onAuthStateChanged, createUserWithEmailAndPassword, signOut, deleteUser } from "firebase/auth";
+import { doc, getDoc, collection, getDocs, query, where, updateDoc, addDoc, setDoc, deleteDoc } from "firebase/firestore";
 import { auth, db } from "@/lib/firebase";
+
+// Leaflet types
+declare global {
+  interface Window {
+    L: any;
+  }
+}
 
 interface UserData {
   firstName: string;
@@ -105,6 +112,14 @@ export default function AdminDashboard() {
   const [selectedEmployeeVehicle, setSelectedEmployeeVehicle] = useState<Vehicle | null>(null);
   const [selectedEmployeeLocation, setSelectedEmployeeLocation] = useState<VehicleLocation | null>(null);
 
+  // Employee creation
+  const [showCreateEmployee, setShowCreateEmployee] = useState(false);
+  const [newEmpFirstName, setNewEmpFirstName] = useState("");
+  const [newEmpLastName, setNewEmpLastName] = useState("");
+  const [newEmpEmail, setNewEmpEmail] = useState("");
+  const [newEmpPassword, setNewEmpPassword] = useState("");
+  const [newEmpRole, setNewEmpRole] = useState("worker");
+
   // Check auth
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
@@ -139,6 +154,103 @@ export default function AdminDashboard() {
     return () => unsubscribe();
   }, [router]);
 
+  // Initialize and update map with Leaflet
+  useEffect(() => {
+    if (activeTab === "tracking" && vehicleLocations.length > 0) {
+      loadLeaflet();
+    }
+  }, [activeTab, vehicleLocations]);
+
+  const loadLeaflet = () => {
+    // Load Leaflet CSS and JS if not already loaded
+    if (!window.L) {
+      const link = document.createElement("link");
+      link.rel = "stylesheet";
+      link.href = "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css";
+      document.head.appendChild(link);
+
+      const script = document.createElement("script");
+      script.src = "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js";
+      script.async = true;
+      script.onload = () => initializeMap();
+      document.head.appendChild(script);
+    } else {
+      initializeMap();
+    }
+  };
+
+  const initializeMap = () => {
+    if (!window.L || !vehicleLocations.length) return;
+
+    const mapElement = document.getElementById("map");
+    if (!mapElement) return;
+
+    // Clear existing map
+    if (mapElement._leaflet_id) {
+      window.L.map(mapElement).remove();
+    }
+
+    const firstLoc = vehicleLocations[0];
+    const map = window.L.map("map", {
+      center: [firstLoc.latitude, firstLoc.longitude],
+      zoom: 13,
+      zoomControl: true,
+    });
+
+    // Add OpenStreetMap tiles
+    window.L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      attribution: "© OpenStreetMap contributors",
+      maxZoom: 19,
+    }).addTo(map);
+
+    // Add markers for each vehicle
+    vehicleLocations.forEach((location) => {
+      const color = location.isTracking ? "green" : "red";
+      const html = `
+        <div style="
+          background: ${location.isTracking ? "#15803d" : "#dc2626"};
+          color: white;
+          border-radius: 50%;
+          width: 32px;
+          height: 32px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          font-weight: bold;
+          border: 3px solid white;
+          box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+          cursor: pointer;
+        ">
+          🚗
+        </div>
+      `;
+
+      const icon = window.L.divIcon({
+        html: html,
+        iconSize: [32, 32],
+        className: "custom-marker",
+      });
+
+      const marker = window.L.marker([location.latitude, location.longitude], {
+        icon: icon,
+        title: location.immatriculation,
+      }).addTo(map);
+
+      marker.bindPopup(`
+        <div style="font-size: 12px; min-width: 150px;">
+          <strong>${location.immatriculation}</strong><br/>
+          ${location.marque} ${location.modele}<br/>
+          ⚡ ${(location.speed || 0).toFixed(1)} km/h<br/>
+          ${location.isTracking ? "🟢 En ligne" : "⚫ Hors ligne"}
+        </div>
+      `);
+
+      marker.on("click", () => {
+        setSelectedEmployee(location as any);
+      });
+    });
+  };
+
   // Load all data
   const loadAllData = async () => {
     try {
@@ -168,10 +280,20 @@ export default function AdminDashboard() {
       const vehiclesData = vehiclesSnap.docs.map((doc) => ({ id: doc.id, ...doc.data() })) as Vehicle[];
       setVehicles(vehiclesData);
 
-      // Load vehicle locations
+      // Load vehicle locations and deduplicate (keep latest per vehicleId)
       const locationsSnap = await getDocs(collection(db, "vehicleLocations"));
       const locationsData = locationsSnap.docs.map((doc) => doc.data()) as VehicleLocation[];
-      setVehicleLocations(locationsData);
+      
+      // Remove duplicates - keep only the latest location per vehicle
+      const locationsMap = new Map();
+      locationsData.forEach((loc) => {
+        const existing = locationsMap.get(loc.vehicleId);
+        if (!existing || new Date(loc.timestamp) > new Date(existing.timestamp)) {
+          locationsMap.set(loc.vehicleId, loc);
+        }
+      });
+      
+      setVehicleLocations(Array.from(locationsMap.values()));
 
       // Load work sessions
       const sessionsSnap = await getDocs(collection(db, "workSessions"));
@@ -274,6 +396,62 @@ export default function AdminDashboard() {
       setSelectedEmployeeLocation(location || null);
     } else {
       setSelectedEmployeeLocation(null);
+    }
+  };
+
+  // Create new employee
+  const createEmployee = async () => {
+    if (!newEmpFirstName || !newEmpLastName || !newEmpEmail || !newEmpPassword) {
+      setMessage("❌ Remplissez tous les champs");
+      return;
+    }
+
+    try {
+      // Create Firebase user
+      const userCredential = await createUserWithEmailAndPassword(auth, newEmpEmail, newEmpPassword);
+      const uid = userCredential.user.uid;
+
+      // Add to Firestore with UID as document ID
+      await setDoc(doc(db, "users", uid), {
+        firstName: newEmpFirstName,
+        lastName: newEmpLastName,
+        email: newEmpEmail,
+        role: newEmpRole,
+        createdAt: new Date().toISOString(),
+      });
+
+      setMessage("✓ Employé créé avec succès!");
+      setShowCreateEmployee(false);
+      setNewEmpFirstName("");
+      setNewEmpLastName("");
+      setNewEmpEmail("");
+      setNewEmpPassword("");
+      setNewEmpRole("worker");
+      
+      // Sign out the new employee to restore admin session
+      await signOut(auth);
+      
+      // Reload to re-authenticate as admin
+      setTimeout(() => window.location.reload(), 800);
+      
+    } catch (error: any) {
+      setMessage(`❌ Erreur: ${error.message}`);
+    }
+  };
+
+  // Delete employee
+  const deleteEmployee = async (empId: string, empEmail: string) => {
+    if (!window.confirm(`Supprimer ${empEmail}?`)) return;
+
+    try {
+      // Delete from Firestore
+      await deleteDoc(doc(db, "users", empId));
+      
+      setMessage("✓ Employé supprimé");
+      await loadAllData();
+      setTimeout(() => setMessage(""), 2000);
+    } catch (error: any) {
+      setMessage(`❌ Erreur: ${error.message}`);
     }
   };
 
@@ -746,6 +924,7 @@ export default function AdminDashboard() {
               <div className="flex gap-2 flex-wrap overflow-x-auto pb-2">
                 {[
                   { id: "overview", label: "📊 Vue générale" },
+                  { id: "tracking", label: "📍 Suivi GPS" },
                   { id: "fuel", label: "⛽ Essence" },
                   { id: "issues", label: "🚗 Signalements" },
                   { id: "vacation", label: "🏖️ Congés" },
@@ -999,6 +1178,117 @@ export default function AdminDashboard() {
             </div>
           )}
 
+          {/* GPS Tracking Tab */}
+          {activeTab === "tracking" && (
+            <div className="a3 glass">
+              <div className="glass-inner">
+                <h2 style={{ fontSize: "20px", fontWeight: 700, color: "#1f0a2a", marginBottom: "20px" }}>
+                  📍 Suivi GPS des véhicules
+                </h2>
+
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                  {/* Map */}
+                  <div className="lg:col-span-2">
+                    <div id="map" style={{
+                      width: "100%",
+                      height: "500px",
+                      borderRadius: "12px",
+                      background: "#e5e3ff",
+                      border: "1px solid rgba(200,140,240,0.2)",
+                      overflow: "hidden",
+                    }}>
+                      <div style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        height: "100%",
+                        color: "#6a1ea3",
+                        fontSize: "14px",
+                      }}>
+                        📍 Chargement de la carte...
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Vehicle List */}
+                  <div>
+                    <h3 style={{ fontSize: "14px", fontWeight: 700, color: "#1f0a2a", marginBottom: "12px" }}>
+                      Véhicules ({vehicleLocations.length})
+                    </h3>
+                    <div className="space-y-2 max-h-[600px] overflow-y-auto">
+                      {vehicleLocations.length === 0 ? (
+                        <p className="text-[12px] text-[#6a3a78]">Aucune localisation</p>
+                      ) : (
+                        vehicleLocations.map((loc) => (
+                          <div
+                            key={loc.vehicleId}
+                            onClick={() => setSelectedEmployee(loc as any)}
+                            style={{
+                              background: selectedEmployee?.id === loc.vehicleId ? "rgba(155,62,213,0.15)" : "rgba(255,255,255,0.4)",
+                              border: selectedEmployee?.id === loc.vehicleId ? "1.5px solid rgba(155,62,213,0.5)" : "1px solid rgba(200,140,240,0.2)",
+                              borderRadius: "12px",
+                              padding: "12px",
+                              cursor: "pointer",
+                              transition: "all 0.2s",
+                            }}
+                          >
+                            <p style={{ fontWeight: 700, color: "#1f0a2a", fontSize: "13px" }}>
+                              {loc.immatriculation}
+                            </p>
+                            <p style={{ fontSize: "11px", color: "#6a3a78", marginTop: "2px" }}>
+                              {loc.marque} {loc.modele}
+                            </p>
+                            <p style={{ fontSize: "10px", color: "#9b3ed5", marginTop: "4px" }}>
+                              ⚡ {(loc.speed || 0).toFixed(1)} km/h
+                            </p>
+                            <p style={{ fontSize: "10px", color: loc.isTracking ? "#15803d" : "#6b7280", marginTop: "2px" }}>
+                              {loc.isTracking ? "🟢 En ligne" : "⚫ Hors ligne"}
+                            </p>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Details Panel */}
+                {selectedEmployee && vehicleLocations.find((l) => l.vehicleId === (selectedEmployee as any).id) && (
+                  <div style={{ marginTop: "20px", paddingTop: "20px", borderTop: "1px solid rgba(200,140,240,0.2)" }}>
+                    <h3 style={{ fontSize: "16px", fontWeight: 700, color: "#1f0a2a", marginBottom: "16px" }}>
+                      📍 {(selectedEmployee as any).immatriculation}
+                    </h3>
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                      <div>
+                        <p className="text-[11px] font-bold text-[#9b3ed5] mb-2">Latitude</p>
+                        <p style={{ fontFamily: "monospace", color: "#1f0a2a", fontWeight: 600, fontSize: "12px" }}>
+                          {(selectedEmployee as any).latitude?.toFixed(6)}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-[11px] font-bold text-[#9b3ed5] mb-2">Longitude</p>
+                        <p style={{ fontFamily: "monospace", color: "#1f0a2a", fontWeight: 600, fontSize: "12px" }}>
+                          {(selectedEmployee as any).longitude?.toFixed(6)}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-[11px] font-bold text-[#9b3ed5] mb-2">Vitesse</p>
+                        <p style={{ color: "#1f0a2a", fontWeight: 600, fontSize: "12px" }}>
+                          {((selectedEmployee as any).speed || 0).toFixed(1)} km/h
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-[11px] font-bold text-[#9b3ed5] mb-2">Précision</p>
+                        <p style={{ color: "#1f0a2a", fontWeight: 600, fontSize: "12px" }}>
+                          ±{(selectedEmployee as any).accuracy?.toFixed(0)}m
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
           {/* Employees Tab */}
           {activeTab === "employees" && (
             <div className="a3 glass">
@@ -1006,6 +1296,14 @@ export default function AdminDashboard() {
                 <h2 style={{ fontSize: "20px", fontWeight: 700, color: "#1f0a2a", marginBottom: "20px" }}>
                   👥 Liste des employés
                 </h2>
+
+                <button
+                  onClick={() => setShowCreateEmployee(true)}
+                  className="btn-primary mb-6"
+                  style={{ padding: "10px 20px" }}
+                >
+                  + Créer un employé
+                </button>
 
                 {employees.length === 0 ? (
                   <p className="text-[14px] text-[#6a3a78]">Aucun employé</p>
@@ -1018,6 +1316,7 @@ export default function AdminDashboard() {
                           <th>Email</th>
                           <th>Rôle</th>
                           <th>Depuis</th>
+                          <th>Actions</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -1041,6 +1340,15 @@ export default function AdminDashboard() {
                             </td>
                             <td className="text-[12px]">
                               {new Date(emp.createdAt).toLocaleDateString("fr-FR")}
+                            </td>
+                            <td onClick={(e) => e.stopPropagation()}>
+                              <button
+                                onClick={() => deleteEmployee(emp.id, emp.email)}
+                                className="btn-danger"
+                                style={{ fontSize: "11px", padding: "4px 10px" }}
+                              >
+                                🗑️ Supprimer
+                              </button>
                             </td>
                           </tr>
                         ))}
@@ -1216,6 +1524,105 @@ export default function AdminDashboard() {
                 🚗 Aucun véhicule assigné
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Create Employee Modal */}
+      {showCreateEmployee && (
+        <div style={{
+          position: "fixed",
+          inset: 0,
+          background: "rgba(0,0,0,0.5)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          zIndex: 100,
+          backdropFilter: "blur(4px)",
+        }} onClick={() => setShowCreateEmployee(false)}>
+          <div style={{
+            background: "white",
+            borderRadius: "20px",
+            padding: "32px",
+            maxWidth: "500px",
+            width: "90%",
+            boxShadow: "0 30px 60px rgba(0,0,0,0.3)",
+          }} onClick={(e) => e.stopPropagation()}>
+            <h2 style={{ fontSize: "20px", fontWeight: 700, color: "#1f0a2a", marginBottom: "24px" }}>
+              👤 Créer un employé
+            </h2>
+
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px", marginBottom: "16px" }}>
+              <div>
+                <label className="text-[12px] font-bold text-[#9b3ed5] mb-2 block">Prénom</label>
+                <input
+                  type="text"
+                  value={newEmpFirstName}
+                  onChange={(e) => setNewEmpFirstName(e.target.value)}
+                  className="input-field"
+                  placeholder="John"
+                />
+              </div>
+              <div>
+                <label className="text-[12px] font-bold text-[#9b3ed5] mb-2 block">Nom</label>
+                <input
+                  type="text"
+                  value={newEmpLastName}
+                  onChange={(e) => setNewEmpLastName(e.target.value)}
+                  className="input-field"
+                  placeholder="Doe"
+                />
+              </div>
+            </div>
+
+            <div style={{ marginBottom: "16px" }}>
+              <label className="text-[12px] font-bold text-[#9b3ed5] mb-2 block">Email</label>
+              <input
+                type="email"
+                value={newEmpEmail}
+                onChange={(e) => setNewEmpEmail(e.target.value)}
+                className="input-field"
+                placeholder="john@example.com"
+              />
+            </div>
+
+            <div style={{ marginBottom: "16px" }}>
+              <label className="text-[12px] font-bold text-[#9b3ed5] mb-2 block">Mot de passe</label>
+              <input
+                type="password"
+                value={newEmpPassword}
+                onChange={(e) => setNewEmpPassword(e.target.value)}
+                className="input-field"
+                placeholder="••••••••"
+              />
+            </div>
+
+            <div style={{ marginBottom: "20px" }}>
+              <label className="text-[12px] font-bold text-[#9b3ed5] mb-2 block">Rôle</label>
+              <select
+                value={newEmpRole}
+                onChange={(e) => setNewEmpRole(e.target.value)}
+                className="input-field"
+              >
+                <option value="worker">Employé</option>
+                <option value="admin">Admin</option>
+              </select>
+            </div>
+
+            <div className="flex gap-3">
+              <button
+                onClick={() => setShowCreateEmployee(false)}
+                className="btn-danger flex-1"
+              >
+                Annuler
+              </button>
+              <button
+                onClick={createEmployee}
+                className="btn-primary flex-1"
+              >
+                ✓ Créer
+              </button>
+            </div>
           </div>
         </div>
       )}
