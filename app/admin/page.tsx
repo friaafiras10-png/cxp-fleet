@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { onAuthStateChanged } from "firebase/auth";
-import { doc, getDoc, collection, getDocs, query, where, updateDoc, deleteDoc } from "firebase/firestore";
+import { doc, getDoc, collection, getDocs, query, where, updateDoc } from "firebase/firestore";
 import { auth, db } from "@/lib/firebase";
 
 interface UserData {
@@ -54,16 +54,25 @@ interface VacationRequest {
   createdAt: string;
 }
 
-interface WorkSession {
+interface VehicleLocation {
+  vehicleId: string;
+  immatriculation: string;
+  marque: string;
+  modele: string;
+  latitude: number;
+  longitude: number;
+  accuracy: number;
+  speed: number;
+  timestamp: string;
+  isTracking: boolean;
+}
+
+interface Vehicle {
   id: string;
-  employeeId: string;
-  employeeName: string;
-  vehicleInfo: string;
-  startTime: string;
-  endTime: string | null;
-  startKm: number;
-  endKm: number | null;
-  status: "active" | "completed";
+  marque: string;
+  modele: string;
+  immatriculation: string;
+  chauffeurAssigne: string;
 }
 
 export default function AdminDashboard() {
@@ -79,7 +88,6 @@ export default function AdminDashboard() {
   const [fuelRequests, setFuelRequests] = useState<FuelRequest[]>([]);
   const [issueReports, setIssueReports] = useState<IssueReport[]>([]);
   const [vacationRequests, setVacationRequests] = useState<VacationRequest[]>([]);
-  const [workSessions, setWorkSessions] = useState<WorkSession[]>([]);
 
   // Stats
   const [pendingFuelCount, setPendingFuelCount] = useState(0);
@@ -87,9 +95,15 @@ export default function AdminDashboard() {
   const [pendingVacationCount, setPendingVacationCount] = useState(0);
   const [activeSessionsCount, setActiveSessionsCount] = useState(0);
 
-  // Filters
-  const [selectedEmployee, setSelectedEmployee] = useState("");
-  const [filterStatus, setFilterStatus] = useState("all");
+  // Vehicle & Location data
+  const [vehicles, setVehicles] = useState<Vehicle[]>([]);
+  const [vehicleLocations, setVehicleLocations] = useState<VehicleLocation[]>([]);
+  const [workSessions, setWorkSessions] = useState<any[]>([]);
+
+  // Employee details modal
+  const [selectedEmployee, setSelectedEmployee] = useState<Employee | null>(null);
+  const [selectedEmployeeVehicle, setSelectedEmployeeVehicle] = useState<Vehicle | null>(null);
+  const [selectedEmployeeLocation, setSelectedEmployeeLocation] = useState<VehicleLocation | null>(null);
 
   // Check auth
   useEffect(() => {
@@ -128,36 +142,42 @@ export default function AdminDashboard() {
   // Load all data
   const loadAllData = async () => {
     try {
-      // Load employees
       const empSnap = await getDocs(collection(db, "users"));
       const empData = empSnap.docs
         .map((doc) => ({ id: doc.id, ...doc.data() }))
         .filter((e: any) => e.role === "worker" || e.role === "admin") as Employee[];
       setEmployees(empData);
 
-      // Load fuel requests
       const fuelSnap = await getDocs(collection(db, "fuelRequests"));
       const fuelData = fuelSnap.docs.map((doc) => ({ id: doc.id, ...doc.data() })) as FuelRequest[];
       setFuelRequests(fuelData);
       setPendingFuelCount(fuelData.filter((f) => f.status === "pending").length);
 
-      // Load issue reports
       const issueSnap = await getDocs(collection(db, "issueReports"));
       const issueData = issueSnap.docs.map((doc) => ({ id: doc.id, ...doc.data() })) as IssueReport[];
       setIssueReports(issueData);
       setPendingIssuesCount(issueData.filter((i) => i.status === "reported").length);
 
-      // Load vacation requests
       const vacationSnap = await getDocs(collection(db, "vacationRequests"));
       const vacationData = vacationSnap.docs.map((doc) => ({ id: doc.id, ...doc.data() })) as VacationRequest[];
       setVacationRequests(vacationData);
       setPendingVacationCount(vacationData.filter((v) => v.status === "pending").length);
 
+      // Load vehicles
+      const vehiclesSnap = await getDocs(collection(db, "vehicles"));
+      const vehiclesData = vehiclesSnap.docs.map((doc) => ({ id: doc.id, ...doc.data() })) as Vehicle[];
+      setVehicles(vehiclesData);
+
+      // Load vehicle locations
+      const locationsSnap = await getDocs(collection(db, "vehicleLocations"));
+      const locationsData = locationsSnap.docs.map((doc) => doc.data()) as VehicleLocation[];
+      setVehicleLocations(locationsData);
+
       // Load work sessions
       const sessionsSnap = await getDocs(collection(db, "workSessions"));
-      const sessionsData = sessionsSnap.docs.map((doc) => ({ id: doc.id, ...doc.data() })) as WorkSession[];
+      const sessionsData = sessionsSnap.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
       setWorkSessions(sessionsData);
-      setActiveSessionsCount(sessionsData.filter((s) => s.status === "active").length);
+      setActiveSessionsCount(sessionsData.filter((s: any) => s.status === "active").length);
     } catch (error) {
       console.error("Error loading data:", error);
     }
@@ -241,6 +261,22 @@ export default function AdminDashboard() {
     }
   };
 
+  // Handle employee click to show location
+  const handleEmployeeClick = (employee: Employee) => {
+    setSelectedEmployee(employee);
+    // Find vehicle assigned to this employee
+    const assignedVehicle = vehicles.find((v) => v.chauffeurAssigne === employee.firstName + " " + employee.lastName || v.chauffeurAssigne === employee.email);
+    setSelectedEmployeeVehicle(assignedVehicle || null);
+    
+    // Find vehicle location
+    if (assignedVehicle) {
+      const location = vehicleLocations.find((l) => l.vehicleId === assignedVehicle.id);
+      setSelectedEmployeeLocation(location || null);
+    } else {
+      setSelectedEmployeeLocation(null);
+    }
+  };
+
   // Logout
   const handleLogout = async () => {
     try {
@@ -276,14 +312,6 @@ export default function AdminDashboard() {
         @keyframes fadeUp {
           from { opacity: 0; transform: translateY(16px); }
           to   { opacity: 1; transform: translateY(0); }
-        }
-        @keyframes float1 {
-          0%,100% { transform: translate(0,0) scale(1); }
-          50%     { transform: translate(25px,-20px) scale(1.06); }
-        }
-        @keyframes float2 {
-          0%,100% { transform: translate(0,0) scale(1); }
-          50%     { transform: translate(-30px,22px) scale(0.94); }
         }
         @keyframes pulse {
           0%, 100% { opacity: 1; }
@@ -357,12 +385,14 @@ export default function AdminDashboard() {
           transition: all 0.3s;
           position: relative;
           overflow: hidden;
+          cursor: pointer;
         }
 
         .stat-card:hover {
           border-color: rgba(155,62,213,0.5);
           background: rgba(255,255,255,0.8);
           box-shadow: 0 12px 30px rgba(155,62,213,0.1);
+          transform: translateY(-4px);
         }
 
         .stat-badge {
@@ -536,11 +566,6 @@ export default function AdminDashboard() {
           color: #ef527b;
         }
 
-        .status-resolved {
-          background: rgba(34,197,94,0.15);
-          color: #15803d;
-        }
-
         .urgency-high {
           border-left: 4px solid #ef527b;
         }
@@ -583,6 +608,41 @@ export default function AdminDashboard() {
         tbody tr:hover {
           background: rgba(155,62,213,0.05);
         }
+
+        .feature-card {
+          background: rgba(255,255,255,0.4);
+          border: 1px solid rgba(200,140,240,0.2);
+          border-radius: 16px;
+          padding: 24px;
+          text-align: center;
+          transition: all 0.3s;
+          cursor: pointer;
+        }
+
+        .feature-card:hover {
+          background: rgba(255,255,255,0.7);
+          border-color: rgba(155,62,213,0.4);
+          transform: translateY(-6px);
+          box-shadow: 0 12px 30px rgba(155,62,213,0.15);
+        }
+
+        .feature-card-icon {
+          font-size: 48px;
+          margin-bottom: 12px;
+        }
+
+        .feature-card-title {
+          font-size: 16px;
+          font-weight: 700;
+          color: #1f0a2a;
+          margin-bottom: 8px;
+        }
+
+        .feature-card-desc {
+          font-size: 13px;
+          color: #6a3a78;
+          margin-bottom: 16px;
+        }
       `}</style>
 
       <div className="page-bg" />
@@ -621,7 +681,7 @@ export default function AdminDashboard() {
                     Tableau de bord Admin 🛡️
                   </h1>
                   <p className="text-[13.5px] text-[#6a3a78]">
-                    Gestion centralisée de tous les employés et demandes
+                    Gestion centralisée complète de CXP
                   </p>
                 </div>
                 <button
@@ -644,7 +704,7 @@ export default function AdminDashboard() {
 
           {/* Quick Stats */}
           <div className="a2 grid grid-cols-1 md:grid-cols-4 gap-5 mb-8">
-            <div className="stat-card">
+            <div className="stat-card" onClick={() => setActiveTab("fuel")}>
               {pendingFuelCount > 0 && <div className="stat-badge">{pendingFuelCount}</div>}
               <div className="text-[12px] font-bold text-[#9b3ed5] mb-2">⛽ Essence en attente</div>
               <div style={{ fontSize: "28px", fontWeight: 800, color: "#1f0a2a" }}>
@@ -653,7 +713,7 @@ export default function AdminDashboard() {
               <p className="text-[12px] text-[#6a3a78] mt-1">{fuelRequests.length} total</p>
             </div>
 
-            <div className="stat-card">
+            <div className="stat-card" onClick={() => setActiveTab("issues")}>
               {pendingIssuesCount > 0 && <div className="stat-badge">{pendingIssuesCount}</div>}
               <div className="text-[12px] font-bold text-[#9b3ed5] mb-2">🚗 Problèmes signalés</div>
               <div style={{ fontSize: "28px", fontWeight: 800, color: "#1f0a2a" }}>
@@ -662,7 +722,7 @@ export default function AdminDashboard() {
               <p className="text-[12px] text-[#6a3a78] mt-1">{issueReports.length} total</p>
             </div>
 
-            <div className="stat-card">
+            <div className="stat-card" onClick={() => setActiveTab("vacation")}>
               {pendingVacationCount > 0 && <div className="stat-badge">{pendingVacationCount}</div>}
               <div className="text-[12px] font-bold text-[#9b3ed5] mb-2">🏖️ Congés en attente</div>
               <div style={{ fontSize: "28px", fontWeight: 800, color: "#1f0a2a" }}>
@@ -671,13 +731,12 @@ export default function AdminDashboard() {
               <p className="text-[12px] text-[#6a3a78] mt-1">{vacationRequests.length} total</p>
             </div>
 
-            <div className="stat-card">
-              {activeSessionsCount > 0 && <div className="stat-badge">{activeSessionsCount}</div>}
-              <div className="text-[12px] font-bold text-[#9b3ed5] mb-2">⏱️ Sessions actives</div>
-              <div style={{ fontSize: "28px", fontWeight: 800, color: "#15803d" }}>
-                {activeSessionsCount}
+            <div className="stat-card" onClick={() => router.push("/admin/vehicles")}>
+              <div className="text-[12px] font-bold text-[#9b3ed5] mb-2">🚙 Gestion Flotte</div>
+              <div style={{ fontSize: "28px", fontWeight: 800, color: "#1f0a2a" }}>
+                Ouvrir
               </div>
-              <p className="text-[12px] text-[#6a3a78] mt-1">En ce moment</p>
+              <p className="text-[12px] text-[#6a3a78] mt-1">Véhicules & Maintenance</p>
             </div>
           </div>
 
@@ -691,7 +750,6 @@ export default function AdminDashboard() {
                   { id: "issues", label: "🚗 Signalements" },
                   { id: "vacation", label: "🏖️ Congés" },
                   { id: "employees", label: "👥 Employés" },
-                  { id: "sessions", label: "⏱️ Sessions" },
                 ].map((tab) => (
                   <button
                     key={tab.id}
@@ -708,6 +766,45 @@ export default function AdminDashboard() {
           {/* Overview Tab */}
           {activeTab === "overview" && (
             <div className="space-y-6">
+              <div className="a3 glass mb-8">
+                <div className="glass-inner">
+                  <h2 style={{ fontSize: "20px", fontWeight: 700, color: "#1f0a2a", marginBottom: "24px" }}>
+                    🎯 Sections principales
+                  </h2>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                    {/* Employees Card */}
+                    <div className="feature-card" onClick={() => setActiveTab("employees")}>
+                      <div className="feature-card-icon">👥</div>
+                      <div className="feature-card-title">Employés</div>
+                      <div className="feature-card-desc">
+                        Gestion des {employees.length} employés CXP
+                      </div>
+                      <button className="btn-primary">Voir →</button>
+                    </div>
+
+                    {/* Fleet Management Card */}
+                    <div className="feature-card" onClick={() => router.push("/admin/vehicles")}>
+                      <div className="feature-card-icon">🚗</div>
+                      <div className="feature-card-title">Gestion Flotte</div>
+                      <div className="feature-card-desc">
+                        Véhicules et maintenance
+                      </div>
+                      <button className="btn-primary">Ouvrir →</button>
+                    </div>
+
+                    {/* Requests Card */}
+                    <div className="feature-card" onClick={() => setActiveTab("fuel")}>
+                      <div className="feature-card-icon">📋</div>
+                      <div className="feature-card-title">Demandes</div>
+                      <div className="feature-card-desc">
+                        Essence, congés, et signalements
+                      </div>
+                      <button className="btn-primary">Voir →</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
               <div className="a3 glass">
                 <div className="glass-inner">
                   <h2 style={{ fontSize: "20px", fontWeight: 700, color: "#1f0a2a", marginBottom: "16px" }}>
@@ -735,11 +832,11 @@ export default function AdminDashboard() {
                         Voir les demandes →
                       </button>
                     </div>
-                    <div className="p-4 bg-green-50 border border-green-200 rounded-12">
-                      <p className="text-[13px] font-bold text-green-700 mb-2">⏱️ Sessions actives</p>
-                      <p className="text-[20px] font-bold text-green-800">{activeSessionsCount}</p>
-                      <button onClick={() => setActiveTab("sessions")} className="text-[12px] text-green-600 hover:text-green-700 mt-2">
-                        Voir les sessions →
+                    <div className="p-4 bg-purple-50 border border-purple-200 rounded-12">
+                      <p className="text-[13px] font-bold text-purple-700 mb-2">🚙 Gestion Flotte</p>
+                      <p className="text-[20px] font-bold text-purple-800">Nouveau</p>
+                      <button onClick={() => router.push("/admin/vehicles")} className="text-[12px] text-purple-600 hover:text-purple-700 mt-2">
+                        Ouvrir la page →
                       </button>
                     </div>
                   </div>
@@ -925,7 +1022,7 @@ export default function AdminDashboard() {
                       </thead>
                       <tbody>
                         {employees.map((emp) => (
-                          <tr key={emp.id}>
+                          <tr key={emp.id} onClick={() => handleEmployeeClick(emp)} style={{ cursor: "pointer" }}>
                             <td>
                               <strong>{emp.firstName} {emp.lastName}</strong>
                             </td>
@@ -955,68 +1052,173 @@ export default function AdminDashboard() {
             </div>
           )}
 
-          {/* Sessions Tab */}
-          {activeTab === "sessions" && (
-            <div className="a3 glass">
-              <div className="glass-inner">
-                <h2 style={{ fontSize: "20px", fontWeight: 700, color: "#1f0a2a", marginBottom: "20px" }}>
-                  ⏱️ Sessions de travail
-                </h2>
+        </div>
+      </div>
 
-                {workSessions.length === 0 ? (
-                  <p className="text-[14px] text-[#6a3a78]">Aucune session</p>
+      {/* Employee Details Modal */}
+      {selectedEmployee && (
+        <div style={{
+          position: "fixed",
+          inset: 0,
+          background: "rgba(0,0,0,0.5)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          zIndex: 100,
+          backdropFilter: "blur(4px)",
+        }} onClick={() => setSelectedEmployee(null)}>
+          <div style={{
+            background: "white",
+            borderRadius: "20px",
+            padding: "32px",
+            maxWidth: "600px",
+            width: "90%",
+            maxHeight: "90vh",
+            overflowY: "auto",
+            boxShadow: "0 30px 60px rgba(0,0,0,0.3)",
+          }} onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-6">
+              <h2 style={{ fontSize: "20px", fontWeight: 700, color: "#1f0a2a" }}>
+                👤 {selectedEmployee.firstName} {selectedEmployee.lastName}
+              </h2>
+              <button onClick={() => setSelectedEmployee(null)} style={{
+                background: "none",
+                border: "none",
+                fontSize: "24px",
+                cursor: "pointer",
+                color: "#9b3ed5",
+              }}>
+                ✕
+              </button>
+            </div>
+
+            {/* Employee Info */}
+            <div style={{
+              background: "rgba(155,62,213,0.05)",
+              border: "1px solid rgba(155,62,213,0.2)",
+              borderRadius: "12px",
+              padding: "16px",
+              marginBottom: "20px",
+            }}>
+              <div className="grid grid-cols-2 gap-4 text-[13px]">
+                <div>
+                  <p className="text-[11px] font-bold text-[#9b3ed5] mb-1">Email</p>
+                  <p style={{ color: "#1f0a2a" }}>{selectedEmployee.email}</p>
+                </div>
+                <div>
+                  <p className="text-[11px] font-bold text-[#9b3ed5] mb-1">Rôle</p>
+                  <p style={{ color: "#1f0a2a" }}>{selectedEmployee.role === "admin" ? "Administrateur" : "Employé"}</p>
+                </div>
+                <div>
+                  <p className="text-[11px] font-bold text-[#9b3ed5] mb-1">Depuis</p>
+                  <p style={{ color: "#1f0a2a" }}>{new Date(selectedEmployee.createdAt).toLocaleDateString("fr-FR")}</p>
+                </div>
+              </div>
+            </div>
+
+            {/* Vehicle Location */}
+            {selectedEmployeeVehicle ? (
+              <div>
+                <h3 style={{ fontSize: "16px", fontWeight: 700, color: "#1f0a2a", marginBottom: "12px" }}>
+                  🚗 Véhicule assigné
+                </h3>
+
+                <div style={{
+                  background: "rgba(155,62,213,0.05)",
+                  border: "1px solid rgba(155,62,213,0.2)",
+                  borderRadius: "12px",
+                  padding: "16px",
+                  marginBottom: "20px",
+                }}>
+                  <p className="text-[13px] font-bold text-[#1f0a2a]">{selectedEmployeeVehicle.immatriculation}</p>
+                  <p className="text-[12px] text-[#6a3a78] mt-1">{selectedEmployeeVehicle.marque} {selectedEmployeeVehicle.modele}</p>
+                </div>
+
+                {selectedEmployeeLocation ? (
+                  <div>
+                    <h3 style={{ fontSize: "16px", fontWeight: 700, color: "#1f0a2a", marginBottom: "12px" }}>
+                      📍 Localisation en temps réel
+                    </h3>
+
+                    <div style={{
+                      background: selectedEmployeeLocation.isTracking ? "rgba(34,197,94,0.05)" : "rgba(107,114,128,0.05)",
+                      border: selectedEmployeeLocation.isTracking ? "1px solid rgba(34,197,94,0.2)" : "1px solid rgba(107,114,128,0.2)",
+                      borderRadius: "12px",
+                      padding: "16px",
+                    }}>
+                      <div style={{ marginBottom: "12px" }}>
+                        <span style={{
+                          background: selectedEmployeeLocation.isTracking ? "rgba(34,197,94,0.15)" : "rgba(107,114,128,0.15)",
+                          color: selectedEmployeeLocation.isTracking ? "#15803d" : "#6b7280",
+                          padding: "6px 14px",
+                          borderRadius: "8px",
+                          fontSize: "12px",
+                          fontWeight: 600,
+                        }}>
+                          {selectedEmployeeLocation.isTracking ? "🟢 EN LIGNE" : "⚫ HORS LIGNE"}
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-4 text-[13px]">
+                        <div>
+                          <p className="text-[11px] font-bold text-[#9b3ed5] mb-1">Latitude</p>
+                          <p style={{ color: "#1f0a2a", fontFamily: "monospace" }}>
+                            {selectedEmployeeLocation.latitude.toFixed(6)}
+                          </p>
+                        </div>
+                        <div>
+                          <p className="text-[11px] font-bold text-[#9b3ed5] mb-1">Longitude</p>
+                          <p style={{ color: "#1f0a2a", fontFamily: "monospace" }}>
+                            {selectedEmployeeLocation.longitude.toFixed(6)}
+                          </p>
+                        </div>
+                        <div>
+                          <p className="text-[11px] font-bold text-[#9b3ed5] mb-1">Vitesse</p>
+                          <p style={{ color: "#1f0a2a" }}>{(selectedEmployeeLocation.speed || 0).toFixed(1)} km/h</p>
+                        </div>
+                        <div>
+                          <p className="text-[11px] font-bold text-[#9b3ed5] mb-1">Précision GPS</p>
+                          <p style={{ color: "#1f0a2a" }}>±{selectedEmployeeLocation.accuracy.toFixed(0)}m</p>
+                        </div>
+                        <div className="col-span-2">
+                          <p className="text-[11px] font-bold text-[#9b3ed5] mb-1">Dernière mise à jour</p>
+                          <p style={{ color: "#1f0a2a", fontSize: "12px" }}>
+                            {new Date(selectedEmployeeLocation.timestamp).toLocaleString("fr-FR")}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
                 ) : (
-                  <div className="table-container">
-                    <table>
-                      <thead>
-                        <tr>
-                          <th>Employé</th>
-                          <th>Véhicule</th>
-                          <th>Début</th>
-                          <th>Fin</th>
-                          <th>Km</th>
-                          <th>Statut</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {workSessions.map((session) => (
-                          <tr key={session.id}>
-                            <td><strong>{session.employeeName}</strong></td>
-                            <td>{session.vehicleInfo}</td>
-                            <td className="text-[12px]">
-                              {new Date(session.startTime).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}
-                            </td>
-                            <td className="text-[12px]">
-                              {session.endTime ? new Date(session.endTime).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" }) : "—"}
-                            </td>
-                            <td className="text-[12px]">
-                              {session.startKm} → {session.endKm || "—"}
-                              {session.endKm && <strong style={{ color: "#9b3ed5", marginLeft: "4px" }}>({session.endKm - session.startKm})</strong>}
-                            </td>
-                            <td>
-                              <span style={{
-                                background: session.status === "active" ? "rgba(34,197,94,0.1)" : "rgba(107,114,128,0.1)",
-                                color: session.status === "active" ? "#15803d" : "#374151",
-                                padding: "4px 12px",
-                                borderRadius: "6px",
-                                fontSize: "11px",
-                                fontWeight: 600,
-                              }}>
-                                {session.status === "active" ? "🟢 Active" : "✓ Complétée"}
-                              </span>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                  <div style={{
+                    background: "rgba(107,114,128,0.1)",
+                    border: "1px solid rgba(107,114,128,0.2)",
+                    borderRadius: "12px",
+                    padding: "16px",
+                    textAlign: "center",
+                    color: "#6b7280",
+                    fontSize: "13px",
+                  }}>
+                    📍 Aucune localisation disponible
                   </div>
                 )}
               </div>
-            </div>
-          )}
-
+            ) : (
+              <div style={{
+                background: "rgba(107,114,128,0.1)",
+                border: "1px solid rgba(107,114,128,0.2)",
+                borderRadius: "12px",
+                padding: "16px",
+                textAlign: "center",
+                color: "#6b7280",
+                fontSize: "13px",
+              }}>
+                🚗 Aucun véhicule assigné
+              </div>
+            )}
+          </div>
         </div>
-      </div>
+      )}
     </main>
   );
 }
