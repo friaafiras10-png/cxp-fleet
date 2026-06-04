@@ -186,7 +186,7 @@ export default function AdminDashboard() {
     if (!mapElement) return;
 
     // Clear existing map
-    if (mapElement._leaflet_id) {
+   if ((mapElement as any)._leaflet_id) {
       window.L.map(mapElement).remove();
     }
 
